@@ -24,6 +24,14 @@ Requires Prettier 3.x as a peer dependency.
 npm install --save-dev prettier-plugin-hug-call-arguments
 ```
 
+```sh
+yarn add --dev prettier-plugin-hug-call-arguments
+```
+
+```sh
+pnpm add --save-dev prettier-plugin-hug-call-arguments
+```
+
 Add it to your Prettier config (`.prettierrc`, `.prettierrc.json`,
 `prettier.config.js`, or the `"prettier"` key in `package.json`):
 
