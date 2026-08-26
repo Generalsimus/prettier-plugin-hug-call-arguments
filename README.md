@@ -1,5 +1,19 @@
 # prettier-plugin-hug-call-arguments
 
+[![license][license-src]][license-href]
+[![npm version][npm-version-src]][npm-version-href]
+[![npm downloads][npm-downloads-src]][npm-downloads-href]
+[![CI][ci-src]][ci-href]
+
+[license-src]: https://img.shields.io/badge/license-MIT-brightgreen?&style=flat-square
+[license-href]: https://github.com/Generalsimus/prettier-plugin-hug-call-arguments/blob/main/LICENSE
+[npm-version-src]: https://img.shields.io/npm/v/prettier-plugin-hug-call-arguments?&style=flat-square&logo=npm&logoColor=white&color=CB3837
+[npm-version-href]: https://www.npmjs.com/package/prettier-plugin-hug-call-arguments
+[npm-downloads-src]: https://img.shields.io/npm/dt/prettier-plugin-hug-call-arguments?&style=flat-square&logo=npm&logoColor=white&color=CB3837
+[npm-downloads-href]: https://www.npmjs.com/package/prettier-plugin-hug-call-arguments
+[ci-src]: https://img.shields.io/github/actions/workflow/status/Generalsimus/prettier-plugin-hug-call-arguments/test.yml?branch=main&&style=flat-square
+[ci-href]: https://github.com/Generalsimus/prettier-plugin-hug-call-arguments/actions/workflows/test.yml
+
 Fixes [prettier/prettier#11080](https://github.com/prettier/prettier/issues/11080).
 
 Prettier hugs the last argument of a call when it's a function/object/array
