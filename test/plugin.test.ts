@@ -258,6 +258,26 @@ test("hugs a single-line object with a mix of quoted and unquoted string values"
   assert.equal(await format(input), expected);
 });
 
+test("hugs through a wrapping call whose huggable argument comes first, not last (lodash-style uniqueBy(collection, key))", async () => {
+  const input = `const roomParticipantsInfo = await RoomService.getRoomParticipantsInfo(
+            uniqueBy(
+              room.participants.map((el) => ({
+                roomId: el.roomId,
+                participantIdentity: el.identity,
+              })),
+              'participantIdentity',
+            ),
+          );
+`;
+  const expected = `const roomParticipantsInfo = await RoomService.getRoomParticipantsInfo(uniqueBy(
+  room.participants.map((el) => ({
+    roomId: el.roomId,
+    participantIdentity: el.identity,
+  })), "participantIdentity" ));
+`;
+  assert.equal(await format(input), expected);
+});
+
 test("output is idempotent", async () => {
   const input = `app.delete('/campgrounds/:id', catchAsync(async (req, res) => {
   const { id } = req.params;

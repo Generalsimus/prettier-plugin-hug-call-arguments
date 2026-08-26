@@ -95,8 +95,33 @@ function isHuggableFunction(node: ESNode | undefined | null): boolean {
 }
 
 /**
+ * A short, unbreakable-looking companion argument — the kind lodash-style
+ * `uniqueBy(collection, iteratee)` APIs take alongside the huggable
+ * collection argument. Deliberately conservative: only literals and plain
+ * identifiers qualify, so this plugin never has to guess whether some
+ * arbitrary expression will break.
+ */
+function isSimpleArg(node: ESNode | undefined | null): boolean {
+  if (!node || hasComment(node)) {
+    return false;
+  }
+  return (
+    node.type === "StringLiteral" ||
+    node.type === "NumericLiteral" ||
+    node.type === "BooleanLiteral" ||
+    node.type === "NullLiteral" ||
+    node.type === "Identifier" ||
+    node.type === "TemplateLiteral"
+  );
+}
+
+/**
  * Like Prettier's internal `couldExpandArg`, but also looks through calls
  * that merely wrap a huggable function, e.g. `catchAsync(async () => {})`.
+ * Looks through the *last* argument of the wrapping call (the common case),
+ * or its *first* argument when it's a 2-argument call whose second argument
+ * is short and simple (the lodash-style `uniqueBy(collection, "key")`
+ * shape).
  */
 function couldExpandArg(node: ESNode | undefined | null, depth = 0): boolean {
   if (!node || depth > 4) {
@@ -114,9 +139,49 @@ function couldExpandArg(node: ESNode | undefined | null, depth = 0): boolean {
     !node.typeArguments &&
     !node.typeParameters
   ) {
-    return couldExpandArg(node.arguments.at(-1), depth + 1);
+    if (couldExpandArg(node.arguments.at(-1), depth + 1)) {
+      return true;
+    }
+    const [first, second] = node.arguments;
+    return (
+      node.arguments.length === 2 &&
+      isSimpleArg(second) &&
+      couldExpandArg(first, depth + 1)
+    );
   }
   return false;
+}
+
+/**
+ * Finds which argument of a call is the one worth hugging: the last
+ * argument when it's itself a wrapping call that leads to something
+ * huggable, or — for a 2-argument call whose second argument is short and
+ * simple — the first argument instead. Returns `undefined` when neither
+ * shape matches, so the caller falls back to Prettier's default printing.
+ */
+function findExpandableArgIndex(args: ESNode[]): number | undefined {
+  const isWrappingCall = (arg: ESNode | undefined): boolean =>
+    arg !== undefined &&
+    !hasComment(arg) &&
+    arg.type === "CallExpression" &&
+    !arg.optional &&
+    Boolean(arg.arguments) &&
+    (arg.arguments?.length ?? 0) > 0 &&
+    couldExpandArg(arg);
+
+  const last = args.at(-1);
+  if (isWrappingCall(last)) {
+    return args.length - 1;
+  }
+
+  if (args.length === 2) {
+    const [first, second] = args;
+    if (isWrappingCall(first) && isSimpleArg(second)) {
+      return 0;
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -187,16 +252,8 @@ function tryHugWrappedCallback(
     return undefined;
   }
 
-  const lastArg = args.at(-1);
-  if (
-    !lastArg ||
-    hasComment(lastArg) ||
-    lastArg.type !== "CallExpression" ||
-    lastArg.optional ||
-    !lastArg.arguments ||
-    lastArg.arguments.length === 0 ||
-    !couldExpandArg(lastArg)
-  ) {
+  const expandIndex = findExpandableArgIndex(args);
+  if (expandIndex === undefined) {
     return undefined;
   }
 
@@ -213,20 +270,23 @@ function tryHugWrappedCallback(
   }
 
   const printedArgs = path.map(print, "arguments");
-  const headDocs = printedArgs.slice(0, -1);
-  const lastDoc = printedArgs.at(-1);
+  const expandDoc = printedArgs[expandIndex];
+  const otherDocs = printedArgs.filter((_, i) => i !== expandIndex);
 
-  // If the earlier args don't fit on one line, or the wrapped callback
+  // If the other args don't fit on one line, or the wrapped callback
   // wouldn't break anyway, Prettier's default output is already fine.
   if (
-    lastDoc === undefined ||
-    headDocs.some((doc) => wouldBreakStandalone(doc, options)) ||
-    !wouldBreakStandalone(lastDoc, options)
+    expandDoc === undefined ||
+    otherDocs.some((doc) => wouldBreakStandalone(doc, options)) ||
+    !wouldBreakStandalone(expandDoc, options)
   ) {
     return undefined;
   }
 
-  const headWithCommas = headDocs.flatMap((doc): Doc[] => [doc, ", "]);
+  const beforeDocs = printedArgs.slice(0, expandIndex);
+  const afterDocs = printedArgs.slice(expandIndex + 1);
+  const beforeWithCommas = beforeDocs.flatMap((doc): Doc[] => [doc, ", "]);
+  const afterWithCommas = afterDocs.flatMap((doc): Doc[] => [", ", doc]);
   const trailingComma = options.trailingComma === "all" ? "," : "";
 
   const allArgsBrokenOut = (): Doc =>
@@ -245,7 +305,13 @@ function tryHugWrappedCallback(
     breakParent,
     print("callee"),
     conditionalGroup([
-      ["(", ...headWithCommas, group(lastDoc, { shouldBreak: true }), ")"],
+      [
+        "(",
+        ...beforeWithCommas,
+        group(expandDoc, { shouldBreak: true }),
+        ...afterWithCommas,
+        ")",
+      ],
       allArgsBrokenOut(),
     ]),
   ];

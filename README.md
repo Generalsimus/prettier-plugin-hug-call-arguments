@@ -127,9 +127,13 @@ shapes.
 
 - the callee is a plain identifier or non-computed member chain (`foo`,
   `a.b.c`) — chained calls (`a().b()`) are left untouched
-- the last argument is itself a call whose own last argument is a
-  function/object/array literal (looked through recursively)
-- every earlier argument fits on the opening line
+- one argument is itself a call whose own argument (looked through
+  recursively) is a function/object/array literal — either the *last*
+  argument (the common `catchAsync(cb)` wrapper case), or the *first*
+  argument of a 2-argument call whose second argument is short and simple —
+  a literal or identifier (the lodash-style `uniqueBy(collection, "key")`
+  shape)
+- every other argument fits on the opening line
 - there's no blank line between arguments, no comments on the relevant
   nodes, and no TS type arguments
 
