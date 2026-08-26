@@ -1,0 +1,57 @@
+{
+  "name": "prettier-plugin-hug-call-arguments",
+  "version": "0.1.0",
+  "description": "Prettier plugin: hug the last call argument even when it's wrapped in another call, e.g. app.delete(\"/x\", catchAsync(async (req, res) => { ... })). Fixes https://github.com/prettier/prettier/issues/11080",
+  "author": "soso tsertsvadze",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist dist-test",
+    "build": "npm run clean && tsc --project tsconfig.json",
+    "test": "npm run build && tsc --project tsconfig.test.json && node --test ./dist-test/*.js && rm -rf ./dist-test",
+    "prepublishOnly": "npm run test"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Generalsimus/prettier-plugin-hug-call-arguments.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Generalsimus/prettier-plugin-hug-call-arguments/issues"
+  },
+  "homepage": "https://github.com/Generalsimus/prettier-plugin-hug-call-arguments#readme",
+  "keywords": [
+    "prettier",
+    "prettier-plugin",
+    "formatter",
+    "code-style",
+    "call-arguments",
+    "callback",
+    "typescript"
+  ],
+  "peerDependencies": {
+    "prettier": ">=3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2"
+  }
+}

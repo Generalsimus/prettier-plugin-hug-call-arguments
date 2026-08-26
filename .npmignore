@@ -1,0 +1,12 @@
+/*
+!dist/.*
+!dist
+!package-lock.json
+!package.json
+!README.md
+!LICENSE
+!tsconfig.json
+.github
+node_modules/
+npm-debug.log
+package-lock.json
