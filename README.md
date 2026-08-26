@@ -55,10 +55,44 @@ app.delete("/campgrounds/:id", catchAsync(async (req, res) => {
 }));
 ```
 
+It also flattens short method chains where exactly one call's argument needs
+to break, instead of breaking every `.method()` onto its own line — a common
+look with query builders:
+
+```js
+// input
+db.updateTable('User').set({
+  isDeleted: true,
+  profilePicture: null,
+  username: null,
+}).where('id', '=', user.id).execute();
+
+// vanilla Prettier output
+db
+  .updateTable("User")
+  .set({
+    isDeleted: true,
+    profilePicture: null,
+    username: null,
+  })
+  .where("id", "=", user.id)
+  .execute();
+
+// with this plugin
+db.updateTable("User").set({
+  isDeleted: true,
+  profilePicture: null,
+  username: null,
+}).where("id", "=", user.id).execute();
+```
+
 ## How it works
 
 This plugin wraps Prettier's built-in `estree` printer and only overrides the
-`print` step for `CallExpression` nodes that match a narrow, specific shape:
+`print` step for `CallExpression` nodes that match one of two narrow, specific
+shapes.
+
+**Hugging a call-wrapped callback:**
 
 - the callee is a plain identifier or non-computed member chain (`foo`,
   `a.b.c`) — chained calls (`a().b()`) are left untouched
@@ -68,8 +102,17 @@ This plugin wraps Prettier's built-in `estree` printer and only overrides the
 - there's no blank line between arguments, no comments on the relevant
   nodes, and no TS type arguments
 
-Every other node, and every `CallExpression` that doesn't match that shape,
-is delegated unchanged to Prettier's original printer.
+**Flattening a method chain:**
+
+- every link is a plain, non-computed, non-optional `.name(...)` call down to
+  a simple base (an identifier, `this`, or a non-computed member chain)
+- exactly one link's arguments need to break — zero or more than one falls
+  back to Prettier's normal chain layout
+- the flattened result is rendered and measured against `printWidth`; if any
+  line would overflow, it falls back to Prettier's normal chain layout too
+
+Every other node, and every `CallExpression` that doesn't match one of these
+shapes, is delegated unchanged to Prettier's original printer.
 
 ## Usage
 

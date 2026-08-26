@@ -70,6 +70,85 @@ test("does not touch member/call chains", async () => {
   assert.equal(await format(input), input);
 });
 
+test("hugs the one breaking argument in a short method chain", async () => {
+  const input = `db.updateTable('User').set({
+  isDeleted: true,
+  profilePicture: null,
+  username: null,
+}).where('id', '=', user.id).execute();
+`;
+  const expected = `db.updateTable("User").set({
+  isDeleted: true,
+  profilePicture: null,
+  username: null,
+}).where("id", "=", user.id).execute();
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("falls back to Prettier's normal chain layout when two links break", async () => {
+  const input = `db.updateTable('User').set({
+  isDeleted: true,
+}).where({
+  id: user.id,
+  active: true,
+}).execute();
+`;
+  const expected = `db.updateTable("User")
+  .set({
+    isDeleted: true,
+  })
+  .where({
+    id: user.id,
+    active: true,
+  })
+  .execute();
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("falls back when the flattened chain would overflow printWidth", async () => {
+  const input = `db.updateTable('User').set({
+  isDeleted: true,
+  profilePicture: null,
+}).where('some-really-long-condition-column-name-that-does-not-fit-at-all-on-one-line', '=', user.id).execute();
+`;
+  // The flattened one-block-per-call layout would push
+  // `.where(...).execute();` onto an overflowing line, so this must fall
+  // back to Prettier's normal per-call chain layout instead (the string
+  // literal argument itself still can't be wrapped, which is an unrelated,
+  // pre-existing Prettier limitation — not something this plugin controls).
+  const expected = `db.updateTable("User")
+  .set({
+    isDeleted: true,
+    profilePicture: null,
+  })
+  .where(
+    "some-really-long-condition-column-name-that-does-not-fit-at-all-on-one-line",
+    "=",
+    user.id,
+  )
+  .execute();
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("does not touch chains with computed member access", async () => {
+  const input = `db.updateTable('User')[method]({
+  isDeleted: true,
+  profilePicture: null,
+}).execute();
+`;
+  const expected = `db.updateTable("User")
+  [method]({
+    isDeleted: true,
+    profilePicture: null,
+  })
+  .execute();
+`;
+  assert.equal(await format(input), expected);
+});
+
 test("output is idempotent", async () => {
   const input = `app.delete('/campgrounds/:id', catchAsync(async (req, res) => {
   const { id } = req.params;

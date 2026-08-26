@@ -22,7 +22,7 @@
 // printer, untouched.
 
 import type { AstPath, Doc, ParserOptions, Plugin, Printer } from "prettier";
-import { builders, utils } from "prettier/doc";
+import { builders, printer, utils } from "prettier/doc";
 // `prettier/plugins/estree` ships CommonJS + ESM builds; the CJS build is
 // what `require`/interop resolves to, and its printer object is what we
 // spread and delegate to for every node we don't special-case.
@@ -36,7 +36,16 @@ const { willBreak } = utils;
 // assignable to `Printer<ESNode>` on its own — no cast needed.
 const estreePrinter: Printer<ESNode> = estree.printers.estree;
 
-/** Minimal structural view of the ESTree/Babel nodes this plugin touches. */
+/**
+ * Minimal structural view of the ESTree/Babel nodes this plugin touches.
+ *
+ * `callee` and `object` are declared as required so `AstPath#call` can chain
+ * through them (`path.call(fn, "callee", "object")`) without the type
+ * collapsing to `never` — see https://github.com/microsoft/TypeScript's
+ * handling of `keyof (T | undefined)`. Every real read of these fields is
+ * still guarded by a runtime truthiness check, since plenty of node types
+ * don't actually have them.
+ */
 interface ESNode {
   type: string;
   start?: number;
@@ -46,8 +55,10 @@ interface ESNode {
   computed?: boolean;
   typeArguments?: unknown;
   typeParameters?: unknown;
-  callee?: ESNode;
-  object?: ESNode;
+  callee: ESNode;
+  object: ESNode;
+  property?: ESNode;
+  name?: string;
   arguments?: ESNode[];
   body?: ESNode;
 }
@@ -213,12 +224,174 @@ function tryHugWrappedCallback(
   ];
 }
 
+// A single `.method(args)` segment of a flattened call chain.
+interface ChainLink {
+  name: string;
+  argsDocs: Doc[];
+}
+
+const MAX_CHAIN_LINKS = 6;
+
+/**
+ * Walks down `node.callee.object` as long as it's a plain, non-computed,
+ * non-optional `.name(...)` call, printing each link's arguments along the
+ * way. Returns `undefined` the moment anything doesn't match that shape
+ * (computed access, optional chaining, generics, comments, spread callee,
+ * ...), so the caller can safely fall back to Prettier's own chain printer.
+ */
+function collectChainLinks(
+  path: AstPath<ESNode>,
+  print: PrintFn,
+  depth: number,
+): { links: ChainLink[]; baseDoc: Doc } | undefined {
+  if (depth > MAX_CHAIN_LINKS) {
+    return undefined;
+  }
+
+  const { node } = path;
+  if (
+    node.type !== "CallExpression" ||
+    node.optional ||
+    node.typeArguments ||
+    node.typeParameters ||
+    hasComment(node)
+  ) {
+    return undefined;
+  }
+
+  const { callee } = node;
+  if (
+    !callee ||
+    callee.type !== "MemberExpression" ||
+    callee.computed ||
+    callee.optional ||
+    hasComment(callee)
+  ) {
+    return undefined;
+  }
+
+  const { property } = callee;
+  if (!property || property.type !== "Identifier" || hasComment(property)) {
+    return undefined;
+  }
+
+  const link: ChainLink = {
+    name: property.name ?? "",
+    argsDocs: path.map(print, "arguments"),
+  };
+
+  const { object } = callee;
+  if (!object || hasComment(object)) {
+    return undefined;
+  }
+
+  if (object.type === "CallExpression") {
+    const inner = path.call(
+      (innerPath) => collectChainLinks(innerPath, print, depth + 1),
+      "callee",
+      "object",
+    );
+    return inner === undefined
+      ? undefined
+      : { links: [...inner.links, link], baseDoc: inner.baseDoc };
+  }
+
+  if (!isSimpleCallee(object)) {
+    return undefined;
+  }
+
+  const baseDoc = path.call(print, "callee", "object");
+  return { links: [link], baseDoc };
+}
+
+/**
+ * Prettier's own doc printer doesn't reliably re-check `printWidth` for
+ * plain content that comes *after* a forced break inside a conditionalGroup
+ * alternative — this is the same class of limitation their own
+ * `isHopefullyShortCallArgument` hack works around (see
+ * https://github.com/prettier/prettier/issues/2456). So rather than trust
+ * `conditionalGroup` to reject an overflowing flat chain on its own, render
+ * the candidate standalone and check every line ourselves.
+ */
+function fitsWhenFlattened(doc: Doc, options: ParserOptions<ESNode>): boolean {
+  const { formatted } = printer.printDocToString(doc, options);
+  return formatted
+    .split("\n")
+    .every((line) => line.length <= options.printWidth);
+}
+
+/**
+ * Handles method chains like `db.updateTable("User").set({ ... }).where(
+ * "id", "=", user.id).execute()`, where Prettier's default chain printer
+ * breaks every `.method()` onto its own line as soon as one argument (here
+ * the object passed to `.set`) doesn't fit. When exactly one link in the
+ * chain needs to break and the rest are short, this keeps the chain flat and
+ * only lets that one argument expand — falling back to Prettier's own
+ * chain layout (via `conditionalGroup`) if the flat version doesn't fit.
+ */
+function tryHugChainArgument(
+  path: AstPath<ESNode>,
+  options: ParserOptions<ESNode>,
+  print: PrintFn,
+): Doc | undefined {
+  const { node } = path;
+
+  if (node.type !== "CallExpression" || node.optional) {
+    return undefined;
+  }
+  // Only handle the outermost call of a chain — if this call is itself
+  // being member-accessed further, let that outer node make the decision.
+  if (path.parent?.type === "MemberExpression") {
+    return undefined;
+  }
+  if (
+    !node.callee ||
+    node.callee.type !== "MemberExpression" ||
+    node.callee.computed ||
+    !node.callee.object ||
+    node.callee.object.type !== "CallExpression"
+  ) {
+    return undefined;
+  }
+
+  const collected = collectChainLinks(path, print, 0);
+  if (!collected || collected.links.length < 2) {
+    return undefined;
+  }
+  const { links, baseDoc } = collected;
+
+  const breakingLinks = links.filter((link) =>
+    link.argsDocs.some((doc) => willBreak(doc)),
+  );
+  if (breakingLinks.length !== 1) {
+    return undefined;
+  }
+
+  const flatDoc: Doc = [
+    baseDoc,
+    ...links.map((link): Doc => {
+      const joinedArgs = link.argsDocs.flatMap((doc, index): Doc[] =>
+        index === 0 ? [doc] : [", ", doc],
+      );
+      return [".", link.name, "(", ...joinedArgs, ")"];
+    }),
+  ];
+
+  if (!fitsWhenFlattened(flatDoc, options)) {
+    return undefined;
+  }
+
+  return [breakParent, flatDoc];
+}
+
 const plugin: Plugin<ESNode> = {
   printers: {
     estree: {
       ...estreePrinter,
       print(path, options, print, args) {
-        const hugged = tryHugWrappedCallback(path, options, print);
+        const hugged =
+          tryHugWrappedCallback(path, options, print) ??
+          tryHugChainArgument(path, options, print);
         return hugged === undefined
           ? estreePrinter.print(path, options, print, args)
           : hugged;
