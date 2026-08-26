@@ -86,15 +86,34 @@ test("hugs the one breaking argument in a short method chain", async () => {
   assert.equal(await format(input), expected);
 });
 
-test("falls back to Prettier's normal chain layout when two links break", async () => {
-  const input = `db.updateTable('User').set({
-  isDeleted: true,
-}).where({
-  id: user.id,
-  active: true,
-}).execute();
+test("hugs an object argument that's too long to fit even though it's written on one line in the source", async () => {
+  // Regression test: the object here has no forced break (objectWrap
+  // wouldn't kick in, since it's on one line in the source) — it only
+  // breaks because it doesn't fit under printWidth. `willBreak()` alone
+  // can't see that, which was silently disabling this whole feature for
+  // any inline object literal (see wouldBreakStandalone).
+  const input = `await db
+  .updateTable('User')
+  .set({ isDeleted: true, profilePicture: null, username: null, name: 'Deleted user', bio: null, isVerified: false, email: \`\${user.id}-email\`, updatedAt: new Date() })
+  .where('id', '=', user.id)
+  .execute();
 `;
-  const expected = `db.updateTable("User")
+  const expected = `await db.updateTable("User").set({
+  isDeleted: true,
+  profilePicture: null,
+  username: null,
+  name: "Deleted user",
+  bio: null,
+  isVerified: false,
+  email: \`\${user.id}-email\`,
+  updatedAt: new Date(),
+}).where("id", "=", user.id).execute();
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("keeps the chain flat even when two links break, each with its own object", async () => {
+  const input = `db.updateTable("User")
   .set({
     isDeleted: true,
   })
@@ -104,21 +123,18 @@ test("falls back to Prettier's normal chain layout when two links break", async 
   })
   .execute();
 `;
+  const expected = `db.updateTable("User").set({
+  isDeleted: true,
+}).where({
+  id: user.id,
+  active: true,
+}).execute();
+`;
   assert.equal(await format(input), expected);
 });
 
-test("falls back when the flattened chain would overflow printWidth", async () => {
-  const input = `db.updateTable('User').set({
-  isDeleted: true,
-  profilePicture: null,
-}).where('some-really-long-condition-column-name-that-does-not-fit-at-all-on-one-line', '=', user.id).execute();
-`;
-  // The flattened one-block-per-call layout would push
-  // `.where(...).execute();` onto an overflowing line, so this must fall
-  // back to Prettier's normal per-call chain layout instead (the string
-  // literal argument itself still can't be wrapped, which is an unrelated,
-  // pre-existing Prettier limitation — not something this plugin controls).
-  const expected = `db.updateTable("User")
+test("keeps the chain flat and lets a link's own arguments break independently", async () => {
+  const input = `db.updateTable("User")
   .set({
     isDeleted: true,
     profilePicture: null,
@@ -130,21 +146,97 @@ test("falls back when the flattened chain would overflow printWidth", async () =
   )
   .execute();
 `;
+  // The chain itself stays flat; `.where(...)`'s own 3-argument list just
+  // breaks on its own (normal Prettier call-argument behavior) since it
+  // doesn't fit — the string literal itself still can't be wrapped, which
+  // is an unrelated, pre-existing Prettier limitation.
+  const expected = `db.updateTable("User").set({
+  isDeleted: true,
+  profilePicture: null,
+}).where(
+  "some-really-long-condition-column-name-that-does-not-fit-at-all-on-one-line",
+  "=",
+  user.id,
+).execute();
+`;
   assert.equal(await format(input), expected);
 });
 
-test("does not touch chains with computed member access", async () => {
-  const input = `db.updateTable('User')[method]({
-  isDeleted: true,
-  profilePicture: null,
-}).execute();
-`;
-  const expected = `db.updateTable("User")
+test("hugs chains with computed member access too", async () => {
+  const input = `db.updateTable("User")
   [method]({
     isDeleted: true,
     profilePicture: null,
   })
   .execute();
+`;
+  const expected = `db.updateTable("User")[method]({
+  isDeleted: true,
+  profilePicture: null,
+}).execute();
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("hugs a two-link chain (no leading .method() before the breaking one)", async () => {
+  const input = `query.select('*').where({
+  id: 1,
+  active: true,
+  role: 'admin',
+});
+`;
+  const expected = `query.select("*").where({
+  id: 1,
+  active: true,
+  role: "admin",
+});
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("hugs a chain where the breaking argument is the last call", async () => {
+  const input = `db.updateTable('User').where('id', '=', user.id).set({
+  isDeleted: true,
+  profilePicture: null,
+  username: null,
+});
+`;
+  const expected = `db.updateTable("User").where("id", "=", user.id).set({
+  isDeleted: true,
+  profilePicture: null,
+  username: null,
+});
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("hugs an array argument the same way as an object argument", async () => {
+  const input = `db.updateTable('User').set(['isDeleted', 'profilePicture', 'username', 'name', 'bio', 'isVerified']).where('id', '=', user.id).execute();
+`;
+  const expected = `db.updateTable("User").set([
+  "isDeleted",
+  "profilePicture",
+  "username",
+  "name",
+  "bio",
+  "isVerified",
+]).where("id", "=", user.id).execute();
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("hugs a longer chain (five links) with one breaking argument", async () => {
+  const input = `qb.select('*').from('users').where('active', '=', true).orderBy('id').set({
+  isDeleted: true,
+  profilePicture: null,
+  username: null,
+});
+`;
+  const expected = `qb.select("*").from("users").where("active", "=", true).orderBy("id").set({
+  isDeleted: true,
+  profilePicture: null,
+  username: null,
+});
 `;
   assert.equal(await format(input), expected);
 });

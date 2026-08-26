@@ -28,8 +28,17 @@ import { builders, printer, utils } from "prettier/doc";
 // spread and delegate to for every node we don't special-case.
 import * as estree from "prettier/plugins/estree";
 
-const { group, conditionalGroup, indent, hardline, join, breakParent } =
-  builders;
+const {
+  group,
+  conditionalGroup,
+  indent,
+  hardline,
+  line,
+  softline,
+  join,
+  ifBreak,
+  breakParent,
+} = builders;
 const { willBreak } = utils;
 
 // `estree.printers.estree` is typed as `Printer<any>` by Prettier, which is
@@ -57,7 +66,7 @@ interface ESNode {
   typeParameters?: unknown;
   callee: ESNode;
   object: ESNode;
-  property?: ESNode;
+  property: ESNode;
   name?: string;
   arguments?: ESNode[];
   body?: ESNode;
@@ -136,6 +145,24 @@ function hasBlankLineBetween(
   return /\n[^\S\n]*\n/.test(originalText.slice(start, end));
 }
 
+/**
+ * `willBreak` only sees *forced* breaks (a hardline, or a group Prettier
+ * already marked `shouldBreak: true` — e.g. an object literal whose first
+ * property was already on its own line in the source, via `objectWrap:
+ * "preserve"`). A conditional break — an object written on one line that's
+ * simply too long to fit — has neither, so `willBreak` misses it. Render the
+ * doc standalone and check whether it needed more than one line instead.
+ * This only decides *how many* links look like they'll break for our own
+ * "exactly one" heuristic; the actual safety net against overflow is
+ * `fitsWhenFlattened`, which measures the real assembled doc.
+ */
+function wouldBreakStandalone(doc: Doc, options: ParserOptions<ESNode>): boolean {
+  if (willBreak(doc)) {
+    return true;
+  }
+  return printer.printDocToString(doc, options).formatted.includes("\n");
+}
+
 type PrintFn = (
   selector?: string | number | Array<string | number> | AstPath<ESNode>,
   args?: unknown,
@@ -193,8 +220,8 @@ function tryHugWrappedCallback(
   // wouldn't break anyway, Prettier's default output is already fine.
   if (
     lastDoc === undefined ||
-    headDocs.some((doc) => willBreak(doc)) ||
-    !willBreak(lastDoc)
+    headDocs.some((doc) => wouldBreakStandalone(doc, options)) ||
+    !wouldBreakStandalone(lastDoc, options)
   ) {
     return undefined;
   }
@@ -224,24 +251,52 @@ function tryHugWrappedCallback(
   ];
 }
 
-// A single `.method(args)` segment of a flattened call chain.
+// A single `.name(args)` or `[expr](args)` segment of a flattened chain.
 interface ChainLink {
-  name: string;
-  argsDocs: Doc[];
+  accessDoc: Doc;
+  argsDoc: Doc;
 }
 
 const MAX_CHAIN_LINKS = 6;
 
 /**
- * Walks down `node.callee.object` as long as it's a plain, non-computed,
- * non-optional `.name(...)` call, printing each link's arguments along the
- * way. Returns `undefined` the moment anything doesn't match that shape
- * (computed access, optional chaining, generics, comments, spread callee,
- * ...), so the caller can safely fall back to Prettier's own chain printer.
+ * Builds the `(...)` doc for one link's argument list the same way a plain,
+ * standalone call would print it: a single argument is hugged directly
+ * against the parens (so an object/array still expands in place, e.g.
+ * `.set({ ... })`, not indented as its own nested line); more than one
+ * argument gets Prettier's normal "fits on one line, else one per line"
+ * group. Either way the break decision is left to Prettier's regular,
+ * width-aware group mechanics — not something this plugin pre-computes.
+ */
+function buildArgsDoc(argsDocs: Doc[], trailingComma: string): Doc {
+  if (argsDocs.length === 0) {
+    return "()";
+  }
+  const [only] = argsDocs;
+  if (argsDocs.length === 1 && only !== undefined) {
+    return ["(", only, ")"];
+  }
+  return group([
+    "(",
+    indent([softline, join([",", line], argsDocs)]),
+    ifBreak(trailingComma),
+    softline,
+    ")",
+  ]);
+}
+
+/**
+ * Walks down `node.callee.object` as long as it's a plain, non-optional
+ * `.name(...)` or `[expr](...)` call, printing each link's property access
+ * and arguments along the way. Returns `undefined` the moment anything
+ * doesn't match that shape (optional chaining, generics, comments, spread
+ * callee, ...), so the caller can safely fall back to Prettier's own chain
+ * printer.
  */
 function collectChainLinks(
   path: AstPath<ESNode>,
   print: PrintFn,
+  options: ParserOptions<ESNode>,
   depth: number,
 ): { links: ChainLink[]; baseDoc: Doc } | undefined {
   if (depth > MAX_CHAIN_LINKS) {
@@ -263,7 +318,6 @@ function collectChainLinks(
   if (
     !callee ||
     callee.type !== "MemberExpression" ||
-    callee.computed ||
     callee.optional ||
     hasComment(callee)
   ) {
@@ -271,13 +325,23 @@ function collectChainLinks(
   }
 
   const { property } = callee;
-  if (!property || property.type !== "Identifier" || hasComment(property)) {
+  if (!property || hasComment(property)) {
     return undefined;
   }
 
+  let accessDoc: Doc;
+  if (callee.computed) {
+    accessDoc = ["[", path.call(print, "callee", "property"), "]"];
+  } else if (property.type === "Identifier") {
+    accessDoc = [".", property.name ?? ""];
+  } else {
+    return undefined;
+  }
+
+  const trailingComma = options.trailingComma === "all" ? "," : "";
   const link: ChainLink = {
-    name: property.name ?? "",
-    argsDocs: path.map(print, "arguments"),
+    accessDoc,
+    argsDoc: buildArgsDoc(path.map(print, "arguments"), trailingComma),
   };
 
   const { object } = callee;
@@ -287,7 +351,7 @@ function collectChainLinks(
 
   if (object.type === "CallExpression") {
     const inner = path.call(
-      (innerPath) => collectChainLinks(innerPath, print, depth + 1),
+      (innerPath) => collectChainLinks(innerPath, print, options, depth + 1),
       "callee",
       "object",
     );
@@ -305,13 +369,14 @@ function collectChainLinks(
 }
 
 /**
- * Prettier's own doc printer doesn't reliably re-check `printWidth` for
- * plain content that comes *after* a forced break inside a conditionalGroup
- * alternative — this is the same class of limitation their own
- * `isHopefullyShortCallArgument` hack works around (see
- * https://github.com/prettier/prettier/issues/2456). So rather than trust
- * `conditionalGroup` to reject an overflowing flat chain on its own, render
- * the candidate standalone and check every line ourselves.
+ * Each link's own argument list already breaks correctly on its own — via
+ * Prettier's normal, width-aware group mechanics — because there's no group
+ * wrapping the whole chain forcing anything. The one thing that mechanism
+ * can't see is a chain of many short, individually-non-breaking links whose
+ * *combined* length still overflows `printWidth` (nothing internal to break
+ * on). So render the assembled candidate standalone and check every line
+ * before committing to it, falling back to Prettier's own chain layout if
+ * it doesn't fit.
  */
 function fitsWhenFlattened(doc: Doc, options: ParserOptions<ESNode>): boolean {
   const { formatted } = printer.printDocToString(doc, options);
@@ -323,11 +388,12 @@ function fitsWhenFlattened(doc: Doc, options: ParserOptions<ESNode>): boolean {
 /**
  * Handles method chains like `db.updateTable("User").set({ ... }).where(
  * "id", "=", user.id).execute()`, where Prettier's default chain printer
- * breaks every `.method()` onto its own line as soon as one argument (here
- * the object passed to `.set`) doesn't fit. When exactly one link in the
- * chain needs to break and the rest are short, this keeps the chain flat and
- * only lets that one argument expand — falling back to Prettier's own
- * chain layout (via `conditionalGroup`) if the flat version doesn't fit.
+ * breaks every `.method()` onto its own line as soon as any argument
+ * doesn't fit. This instead keeps the whole chain flat — `.foo(...).bar(
+ * ...).baz(...)` — and lets each link's own arguments break independently
+ * if they need to, falling back to Prettier's normal chain layout only if
+ * the flattened result doesn't fit the shape this plugin handles, or would
+ * overflow `printWidth`.
  */
 function tryHugChainArgument(
   path: AstPath<ESNode>,
@@ -347,41 +413,28 @@ function tryHugChainArgument(
   if (
     !node.callee ||
     node.callee.type !== "MemberExpression" ||
-    node.callee.computed ||
     !node.callee.object ||
     node.callee.object.type !== "CallExpression"
   ) {
     return undefined;
   }
 
-  const collected = collectChainLinks(path, print, 0);
+  const collected = collectChainLinks(path, print, options, 0);
   if (!collected || collected.links.length < 2) {
     return undefined;
   }
   const { links, baseDoc } = collected;
 
-  const breakingLinks = links.filter((link) =>
-    link.argsDocs.some((doc) => willBreak(doc)),
-  );
-  if (breakingLinks.length !== 1) {
-    return undefined;
-  }
-
   const flatDoc: Doc = [
     baseDoc,
-    ...links.map((link): Doc => {
-      const joinedArgs = link.argsDocs.flatMap((doc, index): Doc[] =>
-        index === 0 ? [doc] : [", ", doc],
-      );
-      return [".", link.name, "(", ...joinedArgs, ")"];
-    }),
+    ...links.map((link): Doc => [link.accessDoc, link.argsDoc]),
   ];
 
   if (!fitsWhenFlattened(flatDoc, options)) {
     return undefined;
   }
 
-  return [breakParent, flatDoc];
+  return willBreak(flatDoc) ? [breakParent, flatDoc] : flatDoc;
 }
 
 const plugin: Plugin<ESNode> = {

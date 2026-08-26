@@ -55,9 +55,8 @@ app.delete("/campgrounds/:id", catchAsync(async (req, res) => {
 }));
 ```
 
-It also flattens short method chains where exactly one call's argument needs
-to break, instead of breaking every `.method()` onto its own line — a common
-look with query builders:
+It also flattens method chains instead of breaking every `.method()` onto its
+own line — a common look with query builders:
 
 ```js
 // input
@@ -104,12 +103,18 @@ shapes.
 
 **Flattening a method chain:**
 
-- every link is a plain, non-computed, non-optional `.name(...)` call down to
-  a simple base (an identifier, `this`, or a non-computed member chain)
-- exactly one link's arguments need to break — zero or more than one falls
-  back to Prettier's normal chain layout
-- the flattened result is rendered and measured against `printWidth`; if any
-  line would overflow, it falls back to Prettier's normal chain layout too
+- every link is a plain, non-optional `.name(...)` or `[expr](...)` call down
+  to a simple base (an identifier, `this`, or a non-computed member chain)
+- each link's own arguments are printed exactly as Prettier would print them
+  standalone — a single object/array/function argument hugs the parens, a
+  multi-argument list breaks onto its own lines only if it doesn't fit — so
+  any number of links can break independently, correctly, with no special
+  casing needed
+- the whole flattened candidate is still rendered and measured against
+  `printWidth` as a final check (catching the one thing per-link breaking
+  can't: many short, individually-fitting links whose *combined* length
+  still overflows); if any line would overflow, it falls back to Prettier's
+  normal chain layout
 
 Every other node, and every `CallExpression` that doesn't match one of these
 shapes, is delegated unchanged to Prettier's original printer.
