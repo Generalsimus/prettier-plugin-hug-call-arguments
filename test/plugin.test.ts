@@ -241,6 +241,23 @@ test("hugs a longer chain (five links) with one breaking argument", async () => 
   assert.equal(await format(input), expected);
 });
 
+test("hugs a single-line object with a mix of quoted and unquoted string values", async () => {
+  const input = `await db.updateTable('User').set({ isDeleted: true, profilePicture: null, username: null, name: 'Deleted user', bio: null, isVerified: false, email: "email", updatedAt: new Date() }).where('id', '=', user.id).execute();
+`;
+  const expected = `await db.updateTable("User").set({
+  isDeleted: true,
+  profilePicture: null,
+  username: null,
+  name: "Deleted user",
+  bio: null,
+  isVerified: false,
+  email: "email",
+  updatedAt: new Date(),
+}).where("id", "=", user.id).execute();
+`;
+  assert.equal(await format(input), expected);
+});
+
 test("output is idempotent", async () => {
   const input = `app.delete('/campgrounds/:id', catchAsync(async (req, res) => {
   const { id } = req.params;
