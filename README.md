@@ -16,6 +16,30 @@
 
 Fixes [prettier/prettier#11080](https://github.com/prettier/prettier/issues/11080).
 
+## Usage
+
+Requires Prettier 3.x as a peer dependency.
+
+```sh
+npm install --save-dev prettier-plugin-hug-call-arguments
+```
+
+Add it to your Prettier config (`.prettierrc`, `.prettierrc.json`,
+`prettier.config.js`, or the `"prettier"` key in `package.json`):
+
+```json
+{
+  "plugins": ["prettier-plugin-hug-call-arguments"]
+}
+```
+
+No other options — it works automatically wherever Prettier already formats
+JS/JSX/TS/TSX with the `estree` printer (the `babel`, `babel-ts`, and
+`typescript` parsers). Nothing to configure, and every case it doesn't
+recognize is left to Prettier's own formatting untouched.
+
+## Examples
+
 Prettier hugs the last argument of a call when it's a function/object/array
 literal:
 
@@ -118,20 +142,6 @@ shapes.
 
 Every other node, and every `CallExpression` that doesn't match one of these
 shapes, is delegated unchanged to Prettier's original printer.
-
-## Usage
-
-```sh
-npm install --save-dev prettier-plugin-hug-call-arguments
-```
-
-`.prettierrc`:
-
-```json
-{
-  "plugins": ["prettier-plugin-hug-call-arguments"]
-}
-```
 
 ## Development
 
