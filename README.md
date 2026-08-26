@@ -127,13 +127,17 @@ shapes.
 
 - the callee is a plain identifier or non-computed member chain (`foo`,
   `a.b.c`) — chained calls (`a().b()`) are left untouched
-- one argument is itself a call whose own argument (looked through
-  recursively) is a function/object/array literal — either the *last*
-  argument (the common `catchAsync(cb)` wrapper case), or the *first*
-  argument of a 2-argument call whose second argument is short and simple —
-  a literal or identifier (the lodash-style `uniqueBy(collection, "key")`
-  shape)
-- every other argument fits on the opening line
+- either the *last* argument is itself a call whose own last argument is a
+  function/object/array literal (looked through recursively, so a chain of
+  wrappers like `a(b(cb))` is still found — the common `catchAsync(cb)` case),
+  or, for a 2-argument call whose second argument is short and simple (a
+  literal or identifier), the *first* argument is such a wrapping call (the
+  lodash-style `uniqueBy(collection, "key")` shape)
+- the resulting line actually fits `printWidth`; if it doesn't (most often
+  because a wrapping call itself sits inside *another* wrapping call), this
+  falls back to Prettier's default printing for the outer call — inner calls
+  still get their own independent chance to hug once Prettier places them at
+  their own, shallower indentation
 - there's no blank line between arguments, no comments on the relevant
   nodes, and no TS type arguments
 

@@ -269,11 +269,16 @@ test("hugs through a wrapping call whose huggable argument comes first, not last
             ),
           );
 `;
-  const expected = `const roomParticipantsInfo = await RoomService.getRoomParticipantsInfo(uniqueBy(
-  room.participants.map((el) => ({
+  // The outer getRoomParticipantsInfo(...) call is left to Prettier's
+  // default breakout (its own opening line would badly overflow printWidth
+  // if fused); the inner uniqueBy(...) still hugs its own map() argument,
+  // since at its own (shallower) indent that fits comfortably.
+  const expected = `const roomParticipantsInfo = await RoomService.getRoomParticipantsInfo(
+  uniqueBy(room.participants.map((el) => ({
     roomId: el.roomId,
     participantIdentity: el.identity,
-  })), "participantIdentity" ));
+  })), "participantIdentity"),
+);
 `;
   assert.equal(await format(input), expected);
 });

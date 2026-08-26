@@ -28,17 +28,8 @@ import { builders, printer, utils } from "prettier/doc";
 // spread and delegate to for every node we don't special-case.
 import * as estree from "prettier/plugins/estree";
 
-const {
-  group,
-  conditionalGroup,
-  indent,
-  hardline,
-  line,
-  softline,
-  join,
-  ifBreak,
-  breakParent,
-} = builders;
+const { group, indent, line, softline, join, ifBreak, breakParent } =
+  builders;
 const { willBreak } = utils;
 
 // `estree.printers.estree` is typed as `Printer<any>` by Prettier, which is
@@ -118,10 +109,16 @@ function isSimpleArg(node: ESNode | undefined | null): boolean {
 /**
  * Like Prettier's internal `couldExpandArg`, but also looks through calls
  * that merely wrap a huggable function, e.g. `catchAsync(async () => {})`.
- * Looks through the *last* argument of the wrapping call (the common case),
- * or its *first* argument when it's a 2-argument call whose second argument
- * is short and simple (the lodash-style `uniqueBy(collection, "key")`
- * shape).
+ * Only ever looks through the *last* argument, arbitrarily deep — so a chain
+ * of wrappers like `a(b(c(cb)))` is still found. Deliberately does *not*
+ * also recurse through the lodash-style "first argument wraps, second is
+ * simple" shape here: that's only applied at the top, in
+ * `findExpandableArgIndex`, for the call actually being printed. Letting it
+ * recurse here would also make an *outer* call think it should hug a
+ * wrapper two levels down, forcing everything onto one line with no way to
+ * tell whether that line will actually fit once it's for real embedded
+ * after an assignment, an `await`, or another wrapping call — see
+ * `fitsWhenFlattened`'s column-0 blind spot below.
  */
 function couldExpandArg(node: ESNode | undefined | null, depth = 0): boolean {
   if (!node || depth > 4) {
@@ -139,15 +136,7 @@ function couldExpandArg(node: ESNode | undefined | null, depth = 0): boolean {
     !node.typeArguments &&
     !node.typeParameters
   ) {
-    if (couldExpandArg(node.arguments.at(-1), depth + 1)) {
-      return true;
-    }
-    const [first, second] = node.arguments;
-    return (
-      node.arguments.length === 2 &&
-      isSimpleArg(second) &&
-      couldExpandArg(first, depth + 1)
-    );
+    return couldExpandArg(node.arguments.at(-1), depth + 1);
   }
   return false;
 }
@@ -228,6 +217,22 @@ function wouldBreakStandalone(doc: Doc, options: ParserOptions<ESNode>): boolean
   return printer.printDocToString(doc, options).formatted.includes("\n");
 }
 
+/**
+ * Prettier's own doc printer doesn't reliably re-check `printWidth` for
+ * plain content that comes *after* a forced break inside a conditionalGroup
+ * alternative — this is the same class of limitation their own
+ * `isHopefullyShortCallArgument` hack works around (see
+ * https://github.com/prettier/prettier/issues/2456). So rather than trust
+ * `conditionalGroup` to reject an overflowing candidate on its own, render it
+ * standalone and check every line ourselves.
+ */
+function fitsWhenFlattened(doc: Doc, options: ParserOptions<ESNode>): boolean {
+  const { formatted } = printer.printDocToString(doc, options);
+  return formatted
+    .split("\n")
+    .every((line) => line.length <= options.printWidth);
+}
+
 type PrintFn = (
   selector?: string | number | Array<string | number> | AstPath<ESNode>,
   args?: unknown,
@@ -287,34 +292,29 @@ function tryHugWrappedCallback(
   const afterDocs = printedArgs.slice(expandIndex + 1);
   const beforeWithCommas = beforeDocs.flatMap((doc): Doc[] => [doc, ", "]);
   const afterWithCommas = afterDocs.flatMap((doc): Doc[] => [", ", doc]);
-  const trailingComma = options.trailingComma === "all" ? "," : "";
 
-  const allArgsBrokenOut = (): Doc =>
-    group(
-      [
-        "(",
-        indent([hardline, join([",", hardline], printedArgs)]),
-        trailingComma,
-        hardline,
-        ")",
-      ],
-      { shouldBreak: true },
-    );
-
-  return [
-    breakParent,
+  const primaryDoc: Doc = [
     print("callee"),
-    conditionalGroup([
-      [
-        "(",
-        ...beforeWithCommas,
-        group(expandDoc, { shouldBreak: true }),
-        ...afterWithCommas,
-        ")",
-      ],
-      allArgsBrokenOut(),
-    ]),
+    "(",
+    ...beforeWithCommas,
+    group(expandDoc, { shouldBreak: true }),
+    ...afterWithCommas,
+    ")",
   ];
+
+  // Rendering this standalone starts it at column 0, blind to whatever real
+  // prefix (an assignment, an `await`, an outer wrapping call) it's actually
+  // embedded after — so this under-counts the true column and can pass a
+  // candidate that will genuinely overflow once placed for real. It's still
+  // the right conservative default: it correctly rejects the case that
+  // matters most (this call's own head arguments are too long to share the
+  // opening line), and erring toward Prettier's own default breakout is
+  // always a safe fallback.
+  if (!fitsWhenFlattened(primaryDoc, options)) {
+    return undefined;
+  }
+
+  return [breakParent, primaryDoc];
 }
 
 // A single `.name(args)` or `[expr](args)` segment of a flattened chain.
@@ -432,23 +432,6 @@ function collectChainLinks(
 
   const baseDoc = path.call(print, "callee", "object");
   return { links: [link], baseDoc };
-}
-
-/**
- * Each link's own argument list already breaks correctly on its own — via
- * Prettier's normal, width-aware group mechanics — because there's no group
- * wrapping the whole chain forcing anything. The one thing that mechanism
- * can't see is a chain of many short, individually-non-breaking links whose
- * *combined* length still overflows `printWidth` (nothing internal to break
- * on). So render the assembled candidate standalone and check every line
- * before committing to it, falling back to Prettier's own chain layout if
- * it doesn't fit.
- */
-function fitsWhenFlattened(doc: Doc, options: ParserOptions<ESNode>): boolean {
-  const { formatted } = printer.printDocToString(doc, options);
-  return formatted
-    .split("\n")
-    .every((line) => line.length <= options.printWidth);
 }
 
 /**
