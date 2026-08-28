@@ -141,6 +141,31 @@ match one of a few narrow, specific shapes.
 - there's no blank line between arguments, no comments on the relevant
   nodes, and no TS type arguments
 
+**Hugging an arrow function's concise body:**
+
+```js
+// input
+const f = (data) =>
+  pgBoss.then((boss) => {
+    return boss.send(jobName, data);
+  });
+
+// with this plugin
+const f = (data) => pgBoss.then((boss) => {
+  return boss.send(jobName, data);
+});
+```
+
+- the arrow has a concise (non-block) body, no type parameters, return type,
+  or predicate, and default `arrowParens`
+- the body is a `CallExpression` that needs multi-line printing (Prettier
+  already hugs directly after `=>` for other body types — objects, arrays,
+  JSX, template literals — so there's no gap to fix there)
+- the resulting line fits `printWidth`; otherwise this falls back to
+  Prettier's default (a hardline after `=>`, body indented on its own line).
+  The arrow's own parameter list can still break onto its own line first the
+  normal way — only the `=> body` boundary is affected
+
 **Flattening a method chain:**
 
 - every link is a plain, non-optional `.name(...)` or `[expr](...)` call down
