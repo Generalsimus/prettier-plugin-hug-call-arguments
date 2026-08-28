@@ -61,6 +61,10 @@ interface ESNode {
   name?: string;
   arguments?: ESNode[];
   body?: ESNode;
+  params?: ESNode[];
+  async?: boolean;
+  returnType?: unknown;
+  predicate?: unknown;
 }
 
 function hasComment(node: ESNode | undefined | null): boolean {
@@ -317,6 +321,76 @@ function tryHugWrappedCallback(
   return [breakParent, primaryDoc];
 }
 
+/**
+ * Handles an arrow function with a concise (non-block) body that's itself a
+ * call needing multi-line printing, e.g.:
+ *
+ *   const f = (data: Job) => pgBoss.then((boss) => {
+ *     ...
+ *   });
+ *
+ * Prettier hugs a concise body directly after `=>` for several node types
+ * (object/array literals, JSX, template literals, ...) but not for a plain
+ * `CallExpression` — it always inserts a hardline after `=>` and indents the
+ * call onto its own line instead, even when the call's own last argument is
+ * already going to hug and break internally regardless. This reproduces
+ * Prettier's own arrow-head printing for the narrow, common shape (no type
+ * parameters, return type, or predicate; default `arrowParens`) and keeps
+ * the body on the same line as `=>` instead.
+ */
+function tryHugArrowBody(
+  path: AstPath<ESNode>,
+  options: ParserOptions<ESNode>,
+  print: PrintFn,
+): Doc | undefined {
+  const { node } = path;
+
+  if (
+    node.type !== "ArrowFunctionExpression" ||
+    hasComment(node) ||
+    node.typeParameters ||
+    node.returnType ||
+    node.predicate ||
+    options.arrowParens === "avoid"
+  ) {
+    return undefined;
+  }
+
+  const body = node.body;
+  if (!body || body.type !== "CallExpression" || hasComment(body)) {
+    return undefined;
+  }
+
+  const bodyDoc = print("body");
+  if (!wouldBreakStandalone(bodyDoc, options)) {
+    return undefined;
+  }
+
+  const trailingComma = options.trailingComma === "all" ? "," : "";
+  const paramsDoc = group([
+    "(",
+    indent([softline, join([",", line], path.map(print, "params"))]),
+    ifBreak(trailingComma),
+    softline,
+    ")",
+  ]);
+
+  const primaryDoc: Doc = [
+    node.async ? "async " : "",
+    paramsDoc,
+    " => ",
+    bodyDoc,
+  ];
+
+  // Same column-0 blind spot as `tryHugWrappedCallback` (see its comment) —
+  // conservative, but errs toward Prettier's own default when unsure.
+  if (!fitsWhenFlattened(primaryDoc, options)) {
+    return undefined;
+  }
+
+  return [breakParent, primaryDoc];
+}
+
 // A single `.name(args)` or `[expr](args)` segment of a flattened chain.
 interface ChainLink {
   accessDoc: Doc;
@@ -493,6 +567,7 @@ const plugin: Plugin<ESNode> = {
       print(path, options, print, args) {
         const hugged =
           tryHugWrappedCallback(path, options, print) ??
+          tryHugArrowBody(path, options, print) ??
           tryHugChainArgument(path, options, print);
         return hugged === undefined
           ? estreePrinter.print(path, options, print, args)

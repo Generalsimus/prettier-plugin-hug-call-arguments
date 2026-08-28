@@ -120,8 +120,8 @@ db.updateTable("User").set({
 ## How it works
 
 This plugin wraps Prettier's built-in `estree` printer and only overrides the
-`print` step for `CallExpression` nodes that match one of two narrow, specific
-shapes.
+`print` step for `CallExpression` and `ArrowFunctionExpression` nodes that
+match one of a few narrow, specific shapes.
 
 **Hugging a call-wrapped callback:**
 

@@ -5,9 +5,12 @@ import prettier from "prettier";
 
 const plugin = path.join(__dirname, "..", "dist", "index.js");
 
-async function format(source: string): Promise<string> {
+async function format(
+  source: string,
+  parser: "babel" | "babel-ts" = "babel",
+): Promise<string> {
   return prettier.format(source, {
-    parser: "babel",
+    parser,
     plugins: [plugin],
   });
 }
@@ -281,6 +284,31 @@ test("hugs through a wrapping call whose huggable argument comes first, not last
 );
 `;
   assert.equal(await format(input), expected);
+});
+
+test("hugs an arrow function's concise call-expression body against =>, instead of breaking after it", async () => {
+  const input = `export const scheduleCommentRoomQueueWorker = (data: commentRoomQueueWorkerJob) =>
+  pgBoss.then((boss) => {
+    return boss.send(commentRoomQueueWorkerName, data, {
+      singletonKey: data.roomId.toString(),
+      retryLimit: 1,
+    });
+  });
+`;
+  // The full signature ("export const ... = (data: commentRoomQueueWorkerJob) =>")
+  // is too long to fit on one line, so the params still break onto their own
+  // line the normal way — but the body now hugs directly against the
+  // resulting ") =>" instead of getting a hardline and its own indented line.
+  const expected = `export const scheduleCommentRoomQueueWorker = (
+  data: commentRoomQueueWorkerJob,
+) => pgBoss.then((boss) => {
+  return boss.send(commentRoomQueueWorkerName, data, {
+    singletonKey: data.roomId.toString(),
+    retryLimit: 1,
+  });
+});
+`;
+  assert.equal(await format(input, "babel-ts"), expected);
 });
 
 test("output is idempotent", async () => {
