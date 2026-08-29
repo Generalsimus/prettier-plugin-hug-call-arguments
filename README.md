@@ -180,6 +180,28 @@ regardless of the original formatting.
 - there's no blank line between arguments, no comments on the relevant
   nodes, and no TS type arguments
 
+**Hugging a call whose sole argument needs it:**
+
+```js
+// input
+firstValueFrom(client.getX({ fileKey: data.fileKey, frameCount: FRAME_COUNT }));
+
+// with this plugin
+firstValueFrom(client.getX({
+  fileKey: data.fileKey,
+  frameCount: FRAME_COUNT,
+}));
+```
+
+- the call has exactly one argument, and it's directly an object or array
+  literal that needs multi-line printing
+- Prettier already hugs this shape reliably *in isolation*, but its own
+  "does the opening line fit" check can still give up and break the call's
+  own parens too once this plugin has fused several outer layers together
+  (pushing the real column deeper than Prettier expected) — there's
+  essentially never a readability win to that fallback over just hugging
+  directly, so this always does instead
+
 **Hugging an arrow function's concise body:**
 
 ```js

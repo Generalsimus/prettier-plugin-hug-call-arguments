@@ -80,7 +80,15 @@ function hasComment(node: ESNode | undefined | null): boolean {
   return Boolean(node?.comments && node.comments.length > 0);
 }
 
-function isHuggableFunction(node: ESNode | undefined | null): boolean {
+/**
+ * The terminal thing worth hugging at the bottom of a chain of wrapping
+ * calls: a function (the common `catchAsync(cb)` case), or a plain
+ * object/array literal directly (e.g. `firstValueFrom(client.getX({ ... }))`
+ * — the object isn't itself wrapped in a function, but it's exactly what
+ * Prettier would hug directly if it were the argument of a plain, unwrapped
+ * call).
+ */
+function isHuggableLiteral(node: ESNode | undefined | null): boolean {
   if (!node) {
     return false;
   }
@@ -95,7 +103,7 @@ function isHuggableFunction(node: ESNode | undefined | null): boolean {
       body?.type === "ArrayExpression"
     );
   }
-  return false;
+  return node.type === "ObjectExpression" || node.type === "ArrayExpression";
 }
 
 /**
@@ -137,7 +145,7 @@ function couldExpandArg(node: ESNode | undefined | null, depth = 0): boolean {
   if (!node || depth > 4) {
     return false;
   }
-  if (isHuggableFunction(node)) {
+  if (isHuggableLiteral(node)) {
     return true;
   }
   if (
@@ -228,6 +236,39 @@ function wouldBreakStandalone(doc: Doc, options: ParserOptions<ESNode>): boolean
     return true;
   }
   return printer.printDocToString(doc, options).formatted.includes("\n");
+}
+
+/**
+ * Prettier's own doc printer doesn't reliably re-check `printWidth` for
+ * plain content that comes *after* a forced break inside a conditionalGroup
+ * alternative — this is the same class of limitation their own
+ * `isHopefullyShortCallArgument` hack works around (see
+ * https://github.com/prettier/prettier/issues/2456). So rather than trust
+ * `conditionalGroup` to reject an overflowing candidate on its own, render it
+ * standalone and check every line ourselves.
+ */
+/**
+ * Prettier's own member/call-chain printer makes its "should I break at the
+ * dots" decision using context (the surrounding call, the real column) this
+ * plugin's manually-reconstructed docs don't provide when they print a
+ * callee in isolation via `print("callee")` — which can make a callee that
+ * vanilla Prettier would never break on its own (see the linked issue)
+ * break at its dots anyway once disconnected from that context. Rendering
+ * it standalone at an effectively unlimited width and using the resulting
+ * plain text instead sidesteps the whole problem: nothing left to make that
+ * decision differently. If something still forces a real break even at
+ * unlimited width (a comment, most likely), this returns `undefined` and
+ * the caller should bail rather than risk it.
+ */
+function renderFlatOrUndefined(
+  doc: Doc,
+  options: ParserOptions<ESNode>,
+): Doc | undefined {
+  const { formatted } = printer.printDocToString(doc, {
+    ...options,
+    printWidth: Number.MAX_SAFE_INTEGER,
+  });
+  return formatted.includes("\n") ? undefined : formatted;
 }
 
 /**
@@ -374,6 +415,14 @@ function tryPreserveMultilineList(
     return undefined;
   }
 
+  if (kind === "call") {
+    const flatPrefix = renderFlatOrUndefined(prefixDoc, options);
+    if (flatPrefix === undefined) {
+      return undefined;
+    }
+    prefixDoc = flatPrefix;
+  }
+
   const printedItems = printItems();
   const listDoc: Doc = [
     openChar,
@@ -387,6 +436,63 @@ function tryPreserveMultilineList(
   ];
 
   return [breakParent, prefixDoc, listDoc, suffixDoc];
+}
+
+/**
+ * A call with exactly one argument that's directly an object or array
+ * literal — `getX({ ... })` — is already hugged reliably by Prettier on its
+ * own, *in isolation*. But Prettier's own "hug the sole argument" mechanism
+ * is still gated on whether the opening line fits at the real column, and
+ * gives up (breaking the call's own parens too) when it doesn't — which
+ * becomes very possible once this plugin has already fused several outer
+ * layers together (e.g. `firstValueFrom(client.getX({ ... }))`, once
+ * `firstValueFrom(...)` hugs, pushes `getX(`'s real column much deeper).
+ * There's essentially never a readability win to giving up like that
+ * instead of just hugging directly, so this always does — but, like the
+ * plugin's other hugging features, only once the argument actually needs
+ * multi-line printing; a short object/array that already fits is left
+ * alone.
+ */
+function tryHugSoleLiteralArg(
+  path: AstPath<ESNode>,
+  options: ParserOptions<ESNode>,
+  print: PrintFn,
+): Doc | undefined {
+  const { node } = path;
+
+  if (
+    node.type !== "CallExpression" ||
+    node.optional ||
+    node.typeArguments ||
+    node.typeParameters ||
+    !node.callee ||
+    !isSimpleCallee(node.callee)
+  ) {
+    return undefined;
+  }
+
+  const args = node.arguments ?? [];
+  const [only] = args;
+  if (
+    args.length !== 1 ||
+    !only ||
+    hasComment(only) ||
+    (only.type !== "ObjectExpression" && only.type !== "ArrayExpression")
+  ) {
+    return undefined;
+  }
+
+  const argDoc = path.map(print, "arguments")[0];
+  if (argDoc === undefined || !wouldBreakStandalone(argDoc, options)) {
+    return undefined;
+  }
+
+  const calleeDoc = renderFlatOrUndefined(print("callee"), options);
+  if (calleeDoc === undefined) {
+    return undefined;
+  }
+
+  return [breakParent, calleeDoc, "(", argDoc, ")"];
 }
 
 function tryHugWrappedCallback(
@@ -439,13 +545,18 @@ function tryHugWrappedCallback(
     return undefined;
   }
 
+  const calleeDoc = renderFlatOrUndefined(print("callee"), options);
+  if (calleeDoc === undefined) {
+    return undefined;
+  }
+
   const beforeDocs = printedArgs.slice(0, expandIndex);
   const afterDocs = printedArgs.slice(expandIndex + 1);
   const beforeWithCommas = beforeDocs.flatMap((doc): Doc[] => [doc, ", "]);
   const afterWithCommas = afterDocs.flatMap((doc): Doc[] => [", ", doc]);
 
   const primaryDoc: Doc = [
-    print("callee"),
+    calleeDoc,
     "(",
     ...beforeWithCommas,
     group(expandDoc, { shouldBreak: true }),
@@ -719,6 +830,7 @@ const plugin: Plugin<ESNode> = {
           tryPreserveMultilineList(path, options, print, "array") ??
           tryPreserveMultilineList(path, options, print, "params") ??
           tryHugWrappedCallback(path, options, print) ??
+          tryHugSoleLiteralArg(path, options, print) ??
           tryHugArrowBody(path, options, print) ??
           tryHugChainArgument(path, options, print);
         return hugged === undefined

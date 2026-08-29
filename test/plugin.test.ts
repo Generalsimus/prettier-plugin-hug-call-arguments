@@ -393,6 +393,33 @@ test("does not preserve a single argument written on its own line — that's not
   assert.equal(await format(input), expected);
 });
 
+test("hugs a call whose sole argument is a plain object, through a wrapping call, through a deep member-chain callee", async () => {
+  // Regression test: getVideoFrameSpriteSheet({ ... })'s argument is
+  // directly an object literal (not itself wrapped in a function), and
+  // its own callee is a multi-level member chain. couldExpandArg() only
+  // recognized functions as directly huggable, missing this — and the
+  // deep member-chain callee, once printed standalone via print("callee")
+  // disconnected from its normal call context, would break at its own
+  // dots (a real Prettier quirk, unrelated to width) unless rendered flat.
+  const input = `class X {
+  getVideoFrameSpriteSheet(data) {
+    return firstValueFrom(this.videoGrpcService.client.getVideoFrameSpriteSheet({
+      fileKey: data.fileKey, frameCount: SPRITE_SHEET_FRAME_COUNT }));
+  }
+}
+`;
+  const expected = `class X {
+  getVideoFrameSpriteSheet(data) {
+    return firstValueFrom(this.videoGrpcService.client.getVideoFrameSpriteSheet({
+      fileKey: data.fileKey,
+      frameCount: SPRITE_SHEET_FRAME_COUNT,
+    }));
+  }
+}
+`;
+  assert.equal(await format(input), expected);
+});
+
 test("output is idempotent", async () => {
   const input = `app.delete('/campgrounds/:id', catchAsync(async (req, res) => {
   const { id } = req.params;
