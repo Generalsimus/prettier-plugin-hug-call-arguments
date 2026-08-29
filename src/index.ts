@@ -28,8 +28,16 @@ import { builders, printer, utils } from "prettier/doc";
 // spread and delegate to for every node we don't special-case.
 import * as estree from "prettier/plugins/estree";
 
-const { group, indent, line, softline, join, ifBreak, breakParent } =
-  builders;
+const {
+  group,
+  indent,
+  line,
+  softline,
+  hardline,
+  join,
+  ifBreak,
+  breakParent,
+} = builders;
 const { willBreak } = utils;
 
 // `estree.printers.estree` is typed as `Printer<any>` by Prettier, which is
@@ -65,6 +73,7 @@ interface ESNode {
   async?: boolean;
   returnType?: unknown;
   predicate?: unknown;
+  elements?: ESNode[];
 }
 
 function hasComment(node: ESNode | undefined | null): boolean {
@@ -241,6 +250,144 @@ type PrintFn = (
   selector?: string | number | Array<string | number> | AstPath<ESNode>,
   args?: unknown,
 ) => Doc;
+
+type ListKind = "call" | "array" | "params";
+
+function getTrailingComma(
+  options: ParserOptions<ESNode>,
+  kind: ListKind,
+): string {
+  if (options.trailingComma === "all") {
+    return ",";
+  }
+  if (options.trailingComma === "es5" && kind === "array") {
+    return ",";
+  }
+  return "";
+}
+
+/**
+ * Prettier already preserves this for object literals by default
+ * (`objectWrap: "preserve"`): write `{` with a newline before the first
+ * property and it stays multi-line, even if it would otherwise fit on one
+ * line. Prettier doesn't extend that courtesy to call arguments, array
+ * elements, or parameter lists — those always auto-collapse to fit
+ * `printWidth` regardless of how they were originally written. This
+ * reproduces the same "respect how the author wrote it" behavior for those
+ * three, so the plugin's own hugging heuristics never fight a layout the
+ * developer explicitly chose by hand.
+ *
+ * Only applies once there are at least two items — with a single item,
+ * there's no "one per line" layout to preserve, and that case is already
+ * handled by this plugin's other hugging behavior (or Prettier's own).
+ * Bails on anything that would make correctly locating the opening bracket
+ * or reproducing the layout unsafe: comments anywhere in the list, a sparse
+ * array, or (for calls) TS type arguments.
+ */
+function tryPreserveMultilineList(
+  path: AstPath<ESNode>,
+  options: ParserOptions<ESNode>,
+  print: PrintFn,
+  kind: ListKind,
+): Doc | undefined {
+  const { node } = path;
+
+  let items: ESNode[] | undefined;
+  let openChar: "(" | "[";
+  let closeChar: ")" | "]";
+  let searchFrom: number | undefined;
+  let prefixDoc: Doc = "";
+  let suffixDoc: Doc = "";
+  let printItems: () => Doc[];
+
+  if (kind === "call") {
+    if (
+      node.type !== "CallExpression" ||
+      node.optional ||
+      node.typeArguments ||
+      node.typeParameters ||
+      !node.callee ||
+      !isSimpleCallee(node.callee) ||
+      // Let chain-flattening handle the outermost call of a chain instead —
+      // this only steps in for a plain, non-chained call.
+      (node.callee.type === "MemberExpression" &&
+        node.callee.object?.type === "CallExpression")
+    ) {
+      return undefined;
+    }
+    items = node.arguments ?? [];
+    openChar = "(";
+    closeChar = ")";
+    searchFrom = node.callee.end;
+    prefixDoc = print("callee");
+    printItems = () => path.map(print, "arguments");
+  } else if (kind === "array") {
+    if (node.type !== "ArrayExpression") {
+      return undefined;
+    }
+    items = node.elements ?? [];
+    openChar = "[";
+    closeChar = "]";
+    searchFrom = node.start;
+    printItems = () => path.map(print, "elements");
+  } else {
+    // Arrow functions only — a plain `function` expression/declaration also
+    // has a name and a block body to reproduce, which is more than this
+    // narrow check is worth taking on.
+    if (
+      node.type !== "ArrowFunctionExpression" ||
+      node.typeParameters ||
+      node.returnType ||
+      node.predicate ||
+      !node.body ||
+      hasComment(node.body)
+    ) {
+      return undefined;
+    }
+    items = node.params ?? [];
+    openChar = "(";
+    closeChar = ")";
+    searchFrom = node.start;
+    prefixDoc = node.async ? "async " : "";
+    suffixDoc = [" => ", print("body")];
+    printItems = () => path.map(print, "params");
+  }
+
+  if (
+    items.length < 2 ||
+    hasComment(node) ||
+    items.some((item) => !item || hasComment(item)) ||
+    searchFrom === undefined
+  ) {
+    return undefined;
+  }
+
+  const openIndex = options.originalText.indexOf(openChar, searchFrom);
+  const firstStart = items[0]?.start;
+  if (openIndex === -1 || firstStart === undefined) {
+    return undefined;
+  }
+  const between = options.originalText.slice(openIndex + 1, firstStart);
+  if (!/\n/.test(between)) {
+    // Not originally multi-line — nothing to preserve; let this plugin's
+    // other hugging attempts, or Prettier's own default, decide.
+    return undefined;
+  }
+
+  const printedItems = printItems();
+  const listDoc: Doc = [
+    openChar,
+    indent([
+      hardline,
+      join([",", hardline], printedItems),
+      getTrailingComma(options, kind),
+    ]),
+    hardline,
+    closeChar,
+  ];
+
+  return [breakParent, prefixDoc, listDoc, suffixDoc];
+}
 
 function tryHugWrappedCallback(
   path: AstPath<ESNode>,
@@ -565,7 +712,12 @@ const plugin: Plugin<ESNode> = {
     estree: {
       ...estreePrinter,
       print(path, options, print, args) {
+        // Preserving a layout the developer explicitly chose by hand takes
+        // priority over this plugin's own hugging heuristics.
         const hugged =
+          tryPreserveMultilineList(path, options, print, "call") ??
+          tryPreserveMultilineList(path, options, print, "array") ??
+          tryPreserveMultilineList(path, options, print, "params") ??
           tryHugWrappedCallback(path, options, print) ??
           tryHugArrowBody(path, options, print) ??
           tryHugChainArgument(path, options, print);

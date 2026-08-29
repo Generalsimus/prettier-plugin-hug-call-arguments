@@ -120,8 +120,47 @@ db.updateTable("User").set({
 ## How it works
 
 This plugin wraps Prettier's built-in `estree` printer and only overrides the
-`print` step for `CallExpression` and `ArrowFunctionExpression` nodes that
-match one of a few narrow, specific shapes.
+`print` step for `CallExpression`, `ArrayExpression`, and
+`ArrowFunctionExpression` nodes that match one of a few narrow, specific
+shapes.
+
+**Preserving a layout you already chose:**
+
+```js
+// input
+foo(
+  1,
+  2,
+);
+
+// with this plugin — kept exactly as written
+foo(
+  1,
+  2,
+);
+
+// bar(1, 2, 3) stays on one line — nothing to preserve, so it's printed
+// the normal, printWidth-aware way
+```
+
+Prettier already does this for object literals by default (`objectWrap:
+"preserve"`): write `{` with a newline before the first property and it
+stays multi-line, even if it would fit on one line. This plugin extends that
+same "respect how the author wrote it" behavior to call arguments, array
+elements, and arrow function parameter lists, which Prettier doesn't
+normally preserve — those always auto-collapse to fit `printWidth`
+regardless of the original formatting.
+
+- applies once there are at least two items with a newline right after the
+  opening `(`/`[` and before the first one — a single item has no "one per
+  line" layout to preserve, so that's left to this plugin's other hugging
+  behavior, or Prettier's own
+- takes priority over every other feature below: a layout you explicitly
+  chose is never fought by this plugin's own hugging heuristics
+- bails on comments anywhere in the list, a sparse array, TS type
+  arguments/parameters, or (for parameters) anything but a plain arrow
+  function — a `function` expression/declaration has a name and block body
+  to reproduce too, which is more than this narrow check takes on
 
 **Hugging a call-wrapped callback:**
 

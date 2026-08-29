@@ -263,19 +263,19 @@ test("hugs a single-line object with a mix of quoted and unquoted string values"
 
 test("hugs through a wrapping call whose huggable argument comes first, not last (lodash-style uniqueBy(collection, key))", async () => {
   const input = `const roomParticipantsInfo = await RoomService.getRoomParticipantsInfo(
-            uniqueBy(
-              room.participants.map((el) => ({
+            uniqueBy(room.participants.map((el) => ({
                 roomId: el.roomId,
                 participantIdentity: el.identity,
-              })),
-              'participantIdentity',
-            ),
+              })), 'participantIdentity'),
           );
 `;
-  // The outer getRoomParticipantsInfo(...) call is left to Prettier's
-  // default breakout (its own opening line would badly overflow printWidth
-  // if fused); the inner uniqueBy(...) still hugs its own map() argument,
-  // since at its own (shallower) indent that fits comfortably.
+  // uniqueBy(...)'s two arguments are written on one line in the source, so
+  // the "preserve original layout" rule doesn't apply here — this exercises
+  // the hugging feature itself. The outer getRoomParticipantsInfo(...) call
+  // is left to Prettier's default breakout (its own opening line would
+  // badly overflow printWidth if fused); the inner uniqueBy(...) still hugs
+  // its own map() argument, since at its own (shallower) indent that fits
+  // comfortably.
   const expected = `const roomParticipantsInfo = await RoomService.getRoomParticipantsInfo(
   uniqueBy(room.participants.map((el) => ({
     roomId: el.roomId,
@@ -309,6 +309,88 @@ test("hugs an arrow function's concise call-expression body against =>, instead 
 });
 `;
   assert.equal(await format(input, "babel-ts"), expected);
+});
+
+test("preserves call arguments written on separate lines, even though they'd fit on one line", async () => {
+  const input = `foo(
+  1,
+  2,
+);
+`;
+  // Same behavior Prettier already gives object literals by default
+  // (objectWrap: "preserve"): a newline right after "(" before the first
+  // argument means the developer chose this layout on purpose, so it's kept
+  // even though "foo(1, 2);" would easily fit under printWidth.
+  const expected = `foo(
+  1,
+  2,
+);
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("collapses call arguments written on one line, same as always", async () => {
+  const input = `bar(1, 2, 3);
+`;
+  const expected = `bar(1, 2, 3);
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("preserves array elements written on separate lines, even though they'd fit on one line", async () => {
+  const input = `const arr = [
+  1,
+  2,
+];
+`;
+  const expected = `const arr = [
+  1,
+  2,
+];
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("still breaks an array written on one line that's too long to fit, the normal Prettier way", async () => {
+  const input = `const many = ["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc", "dddddddddd", "eeeeeeeeee"];
+`;
+  const expected = `const many = [
+  "aaaaaaaaaa",
+  "bbbbbbbbbb",
+  "cccccccccc",
+  "dddddddddd",
+  "eeeeeeeeee",
+];
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("preserves arrow function parameters written on separate lines", async () => {
+  const input = `const add = (
+  x,
+  y,
+) => {
+  return x + y;
+};
+`;
+  const expected = `const add = (
+  x,
+  y,
+) => {
+  return x + y;
+};
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("does not preserve a single argument written on its own line — that's not a 'one per line' layout", async () => {
+  const input = `foo(
+  singleArg,
+);
+`;
+  const expected = `foo(singleArg);
+`;
+  assert.equal(await format(input), expected);
 });
 
 test("output is idempotent", async () => {
