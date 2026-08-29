@@ -1,6 +1,6 @@
 {
   "name": "prettier-plugin-hug-call-arguments",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Prettier plugin: hug the last call argument even when it's wrapped in another call, e.g. app.delete(\"/x\", catchAsync(async (req, res) => { ... })). Fixes https://github.com/prettier/prettier/issues/11080",
   "author": "soso tsertsvadze",
   "license": "MIT",
