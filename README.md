@@ -120,8 +120,8 @@ db.updateTable("User").set({
 ## How it works
 
 This plugin wraps Prettier's built-in `estree` printer and only overrides the
-`print` step for `CallExpression`, `ArrayExpression`, and
-`ArrowFunctionExpression` nodes that match one of a few narrow, specific
+`print` step for `CallExpression`, `ArrayExpression`, `ObjectExpression`,
+`ConditionalExpression`, and `ArrowFunctionExpression` nodes that match one of a few narrow, specific
 shapes.
 
 **Preserving a layout you already chose:**
@@ -151,10 +151,30 @@ elements, and arrow function parameter lists, which Prettier doesn't
 normally preserve — those always auto-collapse to fit `printWidth`
 regardless of the original formatting.
 
-- applies once there are at least two items with a newline right after the
-  opening `(`/`[` and before the first one — a single item has no "one per
-  line" layout to preserve, so that's left to this plugin's other hugging
-  behavior, or Prettier's own
+- a list is split one item per line when there's a newline anywhere between
+  its *own* items — right after the opening `(`/`[`/`{`, between two items,
+  or right before the closing bracket — and at least two items. Objects get
+  the same rule, extending Prettier's own "newline before the first key"
+  check
+- newlines *inside* an item never count: every list decides for itself. A
+  list written on one line stays on that line even when one of its items
+  splits, and only that item breaks:
+
+  ```js
+  // input
+  foo([1, 2, [
+    3, 4]], d);
+
+  // output — the outer array and the call stay inline
+  foo([1, 2, [
+    3,
+    4,
+  ]], d);
+  ```
+
+  The same applies to a ternary written on one line
+  (`a ? foo([\n...\n]) : null`). Either one falls back to Prettier's own
+  layout when even its opening line wouldn't fit `printWidth`
 - takes priority over every other feature below: a layout you explicitly
   chose is never fought by this plugin's own hugging heuristics
 - bails on comments anywhere in the list, a sparse array, TS type

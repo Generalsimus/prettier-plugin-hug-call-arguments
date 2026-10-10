@@ -37,6 +37,7 @@ const {
   join,
   ifBreak,
   breakParent,
+  conditionalGroup,
 } = builders;
 const { willBreak } = utils;
 
@@ -56,8 +57,6 @@ const estreePrinter: Printer<ESNode> = estree.printers.estree;
  */
 interface ESNode {
   type: string;
-  start?: number;
-  end?: number;
   comments?: unknown[];
   optional?: boolean;
   computed?: boolean;
@@ -74,6 +73,10 @@ interface ESNode {
   returnType?: unknown;
   predicate?: unknown;
   elements?: ESNode[];
+  properties?: ESNode[];
+  test?: ESNode;
+  consequent?: ESNode;
+  alternate?: ESNode;
 }
 
 function hasComment(node: ESNode | undefined | null): boolean {
@@ -292,7 +295,7 @@ type PrintFn = (
   args?: unknown,
 ) => Doc;
 
-type ListKind = "call" | "array" | "params";
+type ListKind = "call" | "array" | "params" | "object";
 
 function getTrailingComma(
   options: ParserOptions<ESNode>,
@@ -301,44 +304,159 @@ function getTrailingComma(
   if (options.trailingComma === "all") {
     return ",";
   }
-  if (options.trailingComma === "es5" && kind === "array") {
+  if (
+    options.trailingComma === "es5" &&
+    (kind === "array" || kind === "object")
+  ) {
     return ",";
   }
   return "";
 }
 
 /**
- * Prettier already preserves this for object literals by default
- * (`objectWrap: "preserve"`): write `{` with a newline before the first
- * property and it stays multi-line, even if it would otherwise fit on one
- * line. Prettier doesn't extend that courtesy to call arguments, array
- * elements, or parameter lists — those always auto-collapse to fit
- * `printWidth` regardless of how they were originally written. This
- * reproduces the same "respect how the author wrote it" behavior for those
- * three, so the plugin's own hugging heuristics never fight a layout the
- * developer explicitly chose by hand.
- *
- * Only applies once there are at least two items — with a single item,
- * there's no "one per line" layout to preserve, and that case is already
- * handled by this plugin's other hugging behavior (or Prettier's own).
- * Bails on anything that would make correctly locating the opening bracket
- * or reproducing the layout unsafe: comments anywhere in the list, a sparse
- * array, or (for calls) TS type arguments.
+ * How the author laid out a list's *own* separators in the source:
+ * "multiline" when there's a newline right after the opening bracket,
+ * between any two items, or right before the closing bracket; "inline"
+ * otherwise. Newlines *inside* an item never count — every list (and every
+ * nested list inside its items) decides for itself, independently.
  */
-function tryPreserveMultilineList(
+type ListLayout = "multiline" | "inline";
+
+/**
+ * Returns `undefined` when the brackets can't be located reliably (sparse
+ * array, comments, unexpected source shape), so the caller can bail.
+ */
+function detectListLayout(
+  options: ParserOptions<ESNode>,
+  items: Array<ESNode | null | undefined>,
+  openIndex: number,
+  closeChar: string,
+): ListLayout | undefined {
+  const text = options.originalText;
+  if (
+    items.length === 0 ||
+    openIndex === -1 ||
+    items.some((item) => !item || hasComment(item))
+  ) {
+    return undefined;
+  }
+  const nodes = items as ESNode[];
+  const first = nodes[0] as ESNode;
+  const last = nodes.at(-1) as ESNode;
+  if (openIndex >= options.locStart(first)) {
+    return undefined;
+  }
+
+  // Skip whitespace and an optional trailing comma to reach the bracket.
+  let closeIndex = options.locEnd(last);
+  while (closeIndex < text.length && /[\s,]/.test(text.charAt(closeIndex))) {
+    closeIndex++;
+  }
+  if (text.charAt(closeIndex) !== closeChar) {
+    return undefined;
+  }
+
+  const gaps: Array<[number, number]> = [
+    [openIndex + 1, options.locStart(first)],
+  ];
+  for (let i = 0; i < nodes.length - 1; i++) {
+    gaps.push([
+      options.locEnd(nodes[i] as ESNode),
+      options.locStart(nodes[i + 1] as ESNode),
+    ]);
+  }
+  gaps.push([options.locEnd(last), closeIndex]);
+
+  return gaps.some(([start, end]) => text.slice(start, end).includes("\n"))
+    ? "multiline"
+    : "inline";
+}
+
+/**
+ * The layout of a call's own argument list, as written in the source.
+ */
+function detectCallArgsLayout(
+  node: ESNode,
+  options: ParserOptions<ESNode>,
+): ListLayout | undefined {
+  if (
+    node.type !== "CallExpression" ||
+    node.typeArguments ||
+    node.typeParameters ||
+    !node.callee
+  ) {
+    return undefined;
+  }
+  const openIndex = options.originalText.indexOf(
+    "(",
+    options.locEnd(node.callee),
+  );
+  return detectListLayout(options, node.arguments ?? [], openIndex, ")");
+}
+
+/**
+ * Either one item per line (`multiline`), or every item on the opening
+ * line separated by `, ` (`inline`) — in which case an item that itself
+ * needs several lines (a nested list the author broke, a function body)
+ * breaks on its own, without dragging the rest of this list with it.
+ */
+function buildListDoc(
+  openChar: string,
+  closeChar: string,
+  itemDocs: Doc[],
+  layout: ListLayout,
+  trailingComma: string,
+  padding = "",
+): Doc {
+  if (layout === "multiline") {
+    return [
+      openChar,
+      indent([hardline, join([",", hardline], itemDocs), trailingComma]),
+      hardline,
+      closeChar,
+    ];
+  }
+  return [openChar, padding, join(", ", itemDocs), padding, closeChar];
+}
+
+/**
+ * Respects how the author laid out a list's own items, for call arguments,
+ * array elements, object properties and arrow function parameters:
+ *
+ * - A newline anywhere between the list's own items (or right inside its
+ *   brackets) means "one item per line" — kept even if it would fit on one
+ *   line. Prettier already does a narrower version of this for objects
+ *   (`objectWrap: "preserve"`, newline before the first key only).
+ * - No such newline, but an item that itself needs several lines: the list
+ *   stays on its opening line and only that item breaks, e.g.
+ *   `foo([\n  1,\n  2,\n], b)` — instead of Prettier's default of breaking
+ *   every item out once any one of them breaks. This falls back to
+ *   Prettier's own layout when even the opening line wouldn't fit.
+ * - Otherwise (nothing breaks), Prettier's own width-based layout applies.
+ *
+ * Only newlines between this list's *own* items count; a newline inside
+ * an item belongs to that item, which decides its own layout the same way.
+ *
+ * Bails on anything that would make locating the brackets or reproducing
+ * the layout unsafe: comments anywhere in the list, a sparse array, or
+ * (for calls) TS type arguments.
+ */
+function tryRespectListLayout(
   path: AstPath<ESNode>,
   options: ParserOptions<ESNode>,
   print: PrintFn,
   kind: ListKind,
+  printFallback: () => Doc,
 ): Doc | undefined {
   const { node } = path;
 
-  let items: ESNode[] | undefined;
-  let openChar: "(" | "[";
-  let closeChar: ")" | "]";
-  let searchFrom: number | undefined;
+  let items: ESNode[];
+  let openChar: "(" | "[" | "{";
+  let closeChar: ")" | "]" | "}";
+  let openIndex: number;
   let prefixDoc: Doc = "";
   let suffixDoc: Doc = "";
+  let padding = "";
   let printItems: () => Doc[];
 
   if (kind === "call") {
@@ -359,7 +477,7 @@ function tryPreserveMultilineList(
     items = node.arguments ?? [];
     openChar = "(";
     closeChar = ")";
-    searchFrom = node.callee.end;
+    openIndex = options.originalText.indexOf("(", options.locEnd(node.callee));
     prefixDoc = print("callee");
     printItems = () => path.map(print, "arguments");
   } else if (kind === "array") {
@@ -369,8 +487,18 @@ function tryPreserveMultilineList(
     items = node.elements ?? [];
     openChar = "[";
     closeChar = "]";
-    searchFrom = node.start;
+    openIndex = options.locStart(node);
     printItems = () => path.map(print, "elements");
+  } else if (kind === "object") {
+    if (node.type !== "ObjectExpression") {
+      return undefined;
+    }
+    items = node.properties ?? [];
+    openChar = "{";
+    closeChar = "}";
+    openIndex = options.locStart(node);
+    padding = options.bracketSpacing ? " " : "";
+    printItems = () => path.map(print, "properties");
   } else {
     // Arrow functions only — a plain `function` expression/declaration also
     // has a name and a block body to reproduce, which is more than this
@@ -388,30 +516,29 @@ function tryPreserveMultilineList(
     items = node.params ?? [];
     openChar = "(";
     closeChar = ")";
-    searchFrom = node.start;
+    openIndex = options.originalText.indexOf("(", options.locStart(node));
     prefixDoc = node.async ? "async " : "";
     suffixDoc = [" => ", print("body")];
     printItems = () => path.map(print, "params");
   }
 
+  if (hasComment(node) || options.originalText.charAt(openIndex) !== openChar) {
+    return undefined;
+  }
+  const layout = detectListLayout(options, items, openIndex, closeChar);
   if (
-    items.length < 2 ||
-    hasComment(node) ||
-    items.some((item) => !item || hasComment(item)) ||
-    searchFrom === undefined
+    layout === undefined ||
+    // A single item on its own line isn't a "one per line" layout.
+    (layout === "multiline" && items.length < 2) ||
+    // Prettier already hugs object-pattern params etc. on its own.
+    (layout === "inline" && kind === "params")
   ) {
     return undefined;
   }
 
-  const openIndex = options.originalText.indexOf(openChar, searchFrom);
-  const firstStart = items[0]?.start;
-  if (openIndex === -1 || firstStart === undefined) {
-    return undefined;
-  }
-  const between = options.originalText.slice(openIndex + 1, firstStart);
-  if (!/\n/.test(between)) {
-    // Not originally multi-line — nothing to preserve; let this plugin's
-    // other hugging attempts, or Prettier's own default, decide.
+  const itemDocs = printItems();
+  if (layout === "inline" && !itemDocs.some((doc) => willBreak(doc))) {
+    // Nothing forces a break — Prettier's own width-based layout is fine.
     return undefined;
   }
 
@@ -423,19 +550,77 @@ function tryPreserveMultilineList(
     prefixDoc = flatPrefix;
   }
 
-  const printedItems = printItems();
-  const listDoc: Doc = [
+  const listDoc = buildListDoc(
     openChar,
-    indent([
-      hardline,
-      join([",", hardline], printedItems),
-      getTrailingComma(options, kind),
-    ]),
-    hardline,
     closeChar,
-  ];
+    itemDocs,
+    layout,
+    getTrailingComma(options, kind),
+    padding,
+  );
 
-  return [breakParent, prefixDoc, listDoc, suffixDoc];
+  if (layout === "multiline") {
+    return [breakParent, prefixDoc, listDoc, suffixDoc];
+  }
+  // Same mechanism Prettier uses to hug a last argument: a conditionalGroup
+  // stops the inner break from propagating to (and breaking) this list
+  // itself, while the outer breakParent still lets enclosing groups react.
+  return [
+    breakParent,
+    conditionalGroup([[prefixDoc, listDoc, suffixDoc], printFallback()]),
+  ];
+}
+
+/**
+ * A ternary written on one line whose branch needs several lines (e.g. it
+ * contains a list the author broke) stays on its line — `a ? foo([\n...\n])
+ * : null` — instead of Prettier's default of moving `?` and `:` onto their
+ * own lines. Same "the child's newlines are the child's business" rule as
+ * `tryRespectListLayout`, and the same fallback when it wouldn't fit.
+ */
+function tryInlineConditional(
+  path: AstPath<ESNode>,
+  options: ParserOptions<ESNode>,
+  print: PrintFn,
+  printFallback: () => Doc,
+): Doc | undefined {
+  const { node } = path;
+  const { test, consequent, alternate } = node;
+  if (
+    node.type !== "ConditionalExpression" ||
+    hasComment(node) ||
+    !test ||
+    !consequent ||
+    !alternate ||
+    [test, consequent, alternate].some(hasComment)
+  ) {
+    return undefined;
+  }
+  const text = options.originalText;
+  if (
+    text
+      .slice(options.locEnd(test), options.locStart(consequent))
+      .includes("\n") ||
+    text
+      .slice(options.locEnd(consequent), options.locStart(alternate))
+      .includes("\n")
+  ) {
+    return undefined;
+  }
+
+  const consequentDoc = print("consequent");
+  const alternateDoc = print("alternate");
+  if (!willBreak(consequentDoc) && !willBreak(alternateDoc)) {
+    return undefined;
+  }
+
+  return [
+    breakParent,
+    conditionalGroup([
+      [print("test"), " ? ", consequentDoc, " : ", alternateDoc],
+      printFallback(),
+    ]),
+  ];
 }
 
 /**
@@ -523,9 +708,13 @@ function tryHugWrappedCallback(
     const current = args[i];
     const next = args[i + 1];
     if (
-      current?.end !== undefined &&
-      next?.start !== undefined &&
-      hasBlankLineBetween(options.originalText, current.end, next.start)
+      current &&
+      next &&
+      hasBlankLineBetween(
+        options.originalText,
+        options.locEnd(current),
+        options.locStart(next),
+      )
     ) {
       return undefined;
     }
@@ -665,14 +854,28 @@ const MAX_CHAIN_LINKS = 6;
  * argument gets Prettier's normal "fits on one line, else one per line"
  * group. Either way the break decision is left to Prettier's regular,
  * width-aware group mechanics — not something this plugin pre-computes.
+ *
+ * The exception is the author's own layout, same as `tryRespectListLayout`:
+ * arguments written one per line stay that way, and arguments written on
+ * one line stay there when only one of them needs to break.
  */
-function buildArgsDoc(argsDocs: Doc[], trailingComma: string): Doc {
+function buildArgsDoc(
+  argsDocs: Doc[],
+  trailingComma: string,
+  layout: ListLayout | undefined,
+): Doc {
   if (argsDocs.length === 0) {
     return "()";
   }
   const [only] = argsDocs;
   if (argsDocs.length === 1 && only !== undefined) {
     return ["(", only, ")"];
+  }
+  if (layout === "multiline") {
+    return buildListDoc("(", ")", argsDocs, layout, trailingComma);
+  }
+  if (layout === "inline" && argsDocs.some((doc) => willBreak(doc))) {
+    return buildListDoc("(", ")", argsDocs, layout, trailingComma);
   }
   return group([
     "(",
@@ -739,7 +942,11 @@ function collectChainLinks(
   const trailingComma = options.trailingComma === "all" ? "," : "";
   const link: ChainLink = {
     accessDoc,
-    argsDoc: buildArgsDoc(path.map(print, "arguments"), trailingComma),
+    argsDoc: buildArgsDoc(
+      path.map(print, "arguments"),
+      trailingComma,
+      detectCallArgsLayout(node, options),
+    ),
   };
 
   const { object } = callee;
@@ -823,19 +1030,37 @@ const plugin: Plugin<ESNode> = {
     estree: {
       ...estreePrinter,
       print(path, options, print, args) {
-        // Preserving a layout the developer explicitly chose by hand takes
-        // priority over this plugin's own hugging heuristics.
-        const hugged =
-          tryPreserveMultilineList(path, options, print, "call") ??
-          tryPreserveMultilineList(path, options, print, "array") ??
-          tryPreserveMultilineList(path, options, print, "params") ??
+        const printDefault = (): Doc =>
+          estreePrinter.print(path, options, print, args);
+        const printHugged = (): Doc | undefined =>
           tryHugWrappedCallback(path, options, print) ??
           tryHugSoleLiteralArg(path, options, print) ??
           tryHugArrowBody(path, options, print) ??
           tryHugChainArgument(path, options, print);
-        return hugged === undefined
-          ? estreePrinter.print(path, options, print, args)
-          : hugged;
+        const printFallback = (): Doc => printHugged() ?? printDefault();
+
+        // Respecting a layout the developer explicitly chose by hand takes
+        // priority over this plugin's own hugging heuristics.
+        const custom =
+          tryRespectListLayout(path, options, print, "call", printFallback) ??
+          tryRespectListLayout(path, options, print, "array", printFallback) ??
+          tryRespectListLayout(path, options, print, "object", printFallback) ??
+          tryRespectListLayout(path, options, print, "params", printFallback) ??
+          tryInlineConditional(path, options, print, printFallback) ??
+          printHugged();
+        if (custom === undefined) {
+          return printDefault();
+        }
+        // The estree printer adds required parentheses (e.g. an object
+        // literal as an arrow body) itself, as an outer `["(", doc, ")"]` —
+        // which a custom doc would otherwise silently drop.
+        const defaultDoc = printDefault();
+        return Array.isArray(defaultDoc) &&
+          defaultDoc.length === 3 &&
+          defaultDoc[0] === "(" &&
+          defaultDoc[2] === ")"
+          ? ["(", custom, ")"]
+          : custom;
       },
     },
   },

@@ -7,11 +7,13 @@ const plugin = path.join(__dirname, "..", "dist", "index.js");
 
 async function format(
   source: string,
-  parser: "babel" | "babel-ts" = "babel",
+  parser: "babel" | "babel-ts" | "typescript" = "babel",
+  options: prettier.Options = {},
 ): Promise<string> {
   return prettier.format(source, {
     parser,
     plugins: [plugin],
+    ...options,
   });
 }
 
@@ -430,4 +432,114 @@ test("output is idempotent", async () => {
   const once = await format(input);
   const twice = await format(once);
   assert.equal(once, twice);
+});
+
+test("splits a list one item per line when a newline is between its items, not only right after the bracket", async () => {
+  const input = `foo(a, b,
+  c);
+const arr = [1, 2,
+  3];
+const obj = { a: 1,
+  b: 2 };
+`;
+  const expected = `foo(
+  a,
+  b,
+  c,
+);
+const arr = [
+  1,
+  2,
+  3,
+];
+const obj = {
+  a: 1,
+  b: 2,
+};
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("a newline inside an item doesn't split its parent list — the parent stays inline and only the child splits", async () => {
+  const input = `const a = foo([
+  1, 2], b);
+const c = foo([1, 2, [
+  3, 4]], d);
+const o = { a: 1, b: [
+  1, 2] };
+`;
+  const expected = `const a = foo([
+  1,
+  2,
+], b);
+const c = foo([1, 2, [
+  3,
+  4,
+]], d);
+const o = { a: 1, b: [
+  1,
+  2,
+] };
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("respects the author's list layout in a chained call's arguments too", async () => {
+  const input = `x.select("a").where(1,
+  2).run();
+`;
+  const expected = `x.select("a").where(
+  1,
+  2,
+).run();
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("keeps required parentheses around an object it re-lays out", async () => {
+  const input = `const g = () => ({ a: 1,
+  b: 2 });
+`;
+  const expected = `const g = () => ({
+  a: 1,
+  b: 2,
+});
+`;
+  assert.equal(await format(input), expected);
+});
+
+test("works with the typescript parser, and keeps a one-line ternary inline when only a nested list splits (Kysely select)", async () => {
+  const input = `async function f() {
+    const requestAuthor = requestAuthorUserId ? await dbRW.selectFrom('User').select([
+      'User.id', 'User.isVerified', 'User.feedActivitySeenAt', 'User.previousFeedActivitySeenAt', 'User.feedRotationCursorAt', 'User.feedRotationNextCursorAt']).where('User.id', '=', requestAuthorUserId).executeTakeFirst() : null;
+}
+`;
+  const expected = `async function f() {
+  const requestAuthor = requestAuthorUserId ? await dbRW.selectFrom('User').select([
+    'User.id',
+    'User.isVerified',
+    'User.feedActivitySeenAt',
+    'User.previousFeedActivitySeenAt',
+    'User.feedRotationCursorAt',
+    'User.feedRotationNextCursorAt'
+  ]).where('User.id', '=', requestAuthorUserId).executeTakeFirst() : null;
+}
+`;
+  const options = { printWidth: 120, singleQuote: true, trailingComma: "none" } as const;
+  assert.equal(await format(input, "typescript", options), expected);
+});
+
+test("splits array elements onto lines without touching the (long) elements themselves", async () => {
+  const input = `let query = baseQuery.selectAll('Feed').select([
+      (eb) => eb.selectFrom('FeedReaction').whereRef('FeedReaction.feedId', '=', 'Feed.id').as('booCount'), (eb) => eb.selectFrom('FeedReaction').whereRef('FeedReaction.feedId', '=', 'Feed.id').as('clapCount')]);
+`;
+  const expected = `let query = baseQuery.selectAll('Feed').select([
+  (eb) => eb.selectFrom('FeedReaction').whereRef('FeedReaction.feedId', '=', 'Feed.id').as('booCount'),
+  (eb) => eb.selectFrom('FeedReaction').whereRef('FeedReaction.feedId', '=', 'Feed.id').as('clapCount')
+]);
+`;
+  const options = { printWidth: 200, singleQuote: true, trailingComma: "none" } as const;
+  const once = await format(input, "typescript", options);
+  assert.equal(once, expected);
+  assert.equal(await format(once, "typescript", options), once);
 });
